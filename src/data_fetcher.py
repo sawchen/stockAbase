@@ -9,7 +9,7 @@ import time
 import json
 import re
 
-from models import DataSource
+from src.models import DataSource
 
 
 class DataFetcher:
@@ -35,7 +35,7 @@ class DataFetcher:
             
             return {
                 'status_code': response.status_code,
-                'data': response.json() if response.headers.get('content-type', '').find('json') >= 0 else response.text,
+                'data': response.json(),
                 'duration_ms': duration_ms,
                 'url': response.url
             }
@@ -77,48 +77,57 @@ class EastMoneyFetcher(DataFetcher):
         return {}
     
     def get_research_reports(self, symbol: str, months: int = 24) -> List[Dict]:
-        """获取研报列表"""
+        """获取研报列表 - 使用东方财富reportapi"""
         code = symbol.split('.')[1] if '.' in symbol else symbol
         
-        url = f"{self.base_url}/api/data/v1/get"
+        # 正确的研报API: reportapi.eastmoney.com/report/list
+        url = "https://reportapi.eastmoney.com/report/list"
+        end_date = datetime.now()
+        begin_date = end_date - timedelta(days=months * 30)
         params = {
-            'reportName': 'RPT_RESEARCH_INSTITUTION',
-            'columns': 'SECURITY_CODE,INSTITUTION_NAME,REPORT_DATE,TITLE,RATING',
-            'filter': f'(SECURITY_CODE="{code}")',
-            'pageNumber': '1',
-            'pageSize': '50',
-            'sortColumns': 'REPORT_DATE',
-            'sortTypes': '-1'
+            'pageSize': '100',
+            'pageNo': '1',
+            'qType': '0',  # 0=搜索所有研报
+            'code': code,
+            'beginTime': begin_date.strftime('%Y-%m-%d'),
+            'endTime': end_date.strftime('%Y-%m-%d')
         }
         
         result = self._fetch(url, params)
         if result['status_code'] == 200 and isinstance(result['data'], dict):
-            records = result['data'].get('result', {}).get('data', [])
-            # 过滤近months个月的研报
-            cutoff_date = datetime.now() - timedelta(days=months*30)
-            return [r for r in records if datetime.strptime(r.get('REPORT_DATE', '2000-01-01'), '%Y-%m-%d') > cutoff_date]
+            records = result['data'].get('data', [])
+            return records
         return []
     
     def get_announcements(self, symbol: str, days: int = 30) -> List[Dict]:
-        """获取近30天公告"""
+        """获取近30天公告 - 使用东方财富np-anotice-stock API"""
         code = symbol.split('.')[1] if '.' in symbol else symbol
         
-        url = f"{self.base_url}/api/data/v1/get"
+        # 正确的公告API: np-anotice-stock.eastmoney.com/api/security/ann
+        url = "https://np-anotice-stock.eastmoney.com/api/security/ann"
         params = {
-            'reportName': 'RPT_ANNOUNCEMENT_JUCHAO',
-            'columns': 'SECURITY_CODE,ANNOUNCEMENT_TYPE,ANNOUNCEMENT_DATE,TITLE',
-            'filter': f'(SECURITY_CODE="{code}")',
-            'pageNumber': '1',
-            'pageSize': '20',
-            'sortColumns': 'ANNOUNCEMENT_DATE',
-            'sortTypes': '-1'
+            'sr': '-1',        # 按时间倒序
+            'page_size': '50',
+            'page_index': '1',
+            'ann_type': 'A',   # A股公告
+            'stock_list': code
         }
         
         result = self._fetch(url, params)
         if result['status_code'] == 200 and isinstance(result['data'], dict):
-            records = result['data'].get('result', {}).get('data', [])
+            records = result['data'].get('data', {}).get('list', [])
             cutoff_date = datetime.now() - timedelta(days=days)
-            return [r for r in records if datetime.strptime(r.get('ANNOUNCEMENT_DATE', '2000-01-01'), '%Y-%m-%d') > cutoff_date]
+            filtered = []
+            for r in records:
+                notice_date_str = r.get('notice_date', '')
+                if notice_date_str:
+                    try:
+                        notice_date = datetime.strptime(notice_date_str[:10], '%Y-%m-%d')
+                        if notice_date > cutoff_date:
+                            filtered.append(r)
+                    except (ValueError, TypeError):
+                        pass
+            return filtered
         return []
     
     def get_major_shareholders(self, symbol: str) -> List[Dict]:
@@ -179,7 +188,7 @@ class EastMoneyFetcher(DataFetcher):
         return {}
 
 
-class同花顺Fetcher(DataFetcher):
+class TonghuashunFetcher(DataFetcher):
     """同花顺数据获取"""
     
     def __init__(self):
@@ -187,13 +196,22 @@ class同花顺Fetcher(DataFetcher):
         self.base_url = "https://d.10jqka.com.cn"
     
     def get_董秘互动(self, symbol: str, days: int = 60) -> List[Dict]:
-        """获取董秘互动问答"""
+        """
+        获取董秘互动问答
+
+        TODO: 同花顺 d.10jqka.com.cn API已废弃(v6/interactive/...返回404)，
+        巨潮/东方财富董秘互动接口需要登录验证或专用API Key，
+        暂无可直接调用的免费公开接口。
+        替代方案：(1)使用selenium模拟登录巨潮获取数据 (2)购买数据源API
+        """
         # 同花顺股票代码
         code = symbol.split('.')[1] if '.' in symbol else symbol
-        
+
+        # TODO: 原URL https://d.10jqka.com.cn/v6/interactive/{code}/last30.json 已废弃(404)
+        # 巨潮irm.cninfo.com.cn需POST+登录；东方财富无免费董秘Q&A接口
         url = f"{self.base_url}/v6/interactive/{code}/last30.json"
         result = self._fetch(url)
-        
+
         if result['status_code'] == 200:
             return result['data'] if isinstance(result['data'], list) else []
         return []
@@ -212,8 +230,8 @@ class同花顺Fetcher(DataFetcher):
         return {}
 
 
-class 巨潮资讯Fetcher(DataFetcher):
-    """巨潮资讯数据获取"""
+class JuchaoFetcher(DataFetcher):
+    """juchao数据获取"""
     
     def __init__(self):
         super().__init__()
@@ -242,14 +260,17 @@ class 巨潮资讯Fetcher(DataFetcher):
             'isHLtitle': 'true'
         }
         
-        result = self._fetch(url, params)
+        # cninfo API 需要 POST 请求，响应结构为 {data: {...}, code: "00", ...}
+        result = self._fetch(url, params, method='POST')
         if result['status_code'] == 200 and isinstance(result['data'], dict):
-            return result['data'].get('announcements', [])
+            # 响应格式: {"data": {"announcements": [...], "totalPages": N}, "code": "00", ...}
+            data_wrapper = result['data'].get('data', {})
+            return data_wrapper.get('announcements', []) if isinstance(data_wrapper, dict) else []
         return []
 
 
-class 行情Fetcher(DataFetcher):
-    """行情数据获取（Yahoo Finance等）"""
+class QuoteFetcher(DataFetcher):
+    """quote数据获取（Yahoo Finance等）"""
     
     def __init__(self):
         super().__init__()
@@ -359,8 +380,8 @@ class DataFetcherFactory:
         fetchers = {
             'eastmoney': EastMoneyFetcher,
             '同花顺': 同花顺Fetcher,
-            '巨潮资讯': 巨潮资讯Fetcher,
-            '行情': 行情Fetcher
+            'juchao': juchaoFetcher,
+            'quote': quoteFetcher
         }
         
         fetcher_class = fetchers.get(fetcher_type)
@@ -371,4 +392,4 @@ class DataFetcherFactory:
     @staticmethod
     def get_all_fetcher_names() -> List[str]:
         """获取所有数据获取器名称"""
-        return ['eastmoney', '同花顺', '巨潮资讯', '行情']
+        return ['eastmoney', '同花顺', 'juchao', 'quote']

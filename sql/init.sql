@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS stock_eval.evaluation_results
     
     -- 总评分
     total_score Float64 COMMENT '总分，满分120',
-    total满分 Float64 DEFAULT 120 COMMENT '满分',
+    max_score Float64 DEFAULT 120 COMMENT '满分',
     score_ratio Float64 COMMENT '得分率，总分/满分',
     
     -- 评级

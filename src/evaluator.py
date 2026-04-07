@@ -3,14 +3,15 @@
 """
 
 import uuid
+import logging
 from datetime import datetime
 from typing import Dict, List, Any
 
-from models import (
+from src.models import (
     EvaluationResult, DimensionScore, DataSource, Rating,
     get_rating, DIMENSION_CATEGORIES
 )
-from data_fetcher import EastMoneyFetcher, 同花顺Fetcher, 巨潮资讯Fetcher, 行情Fetcher
+from src.data_fetcher import EastMoneyFetcher, TonghuashunFetcher, JuchaoFetcher, QuoteFetcher
 
 
 class StockEvaluator:
@@ -18,14 +19,17 @@ class StockEvaluator:
     
     def __init__(self):
         self.eastmoney = EastMoneyFetcher()
-        self.同花顺 = 同花顺Fetcher()
-        self.巨潮资讯 = 巨潮资讯Fetcher()
-        self.行情 = 行情Fetcher()
+        self.tonghuashun = TonghuashunFetcher()
+        self.juchao = JuchaoFetcher()
+        self.quote = QuoteFetcher()
         
         self.知名机构名单 = [
             '证金', '汇金', '社保', '公募', '私募', '保险', '外资',
             '高盛', '摩根', '瑞银', '野村', '摩根士丹利', '花旗'
         ]
+        
+        # 配置日志
+        self.logger = logging.getLogger(__name__)
     
     def evaluate(self, symbol: str, stock_name: str = None) -> EvaluationResult:
         """执行全面评估"""
@@ -60,18 +64,36 @@ class StockEvaluator:
         return result
     
     def _collect_raw_data(self, symbol: str) -> Dict[str, Any]:
-        """收集所有原始数据"""
+        """收集所有原始数据，带异常保护"""
         data = {}
-        data['stock_info'] = self.eastmoney.get_stock_info(symbol)
-        data['research_reports'] = self.eastmoney.get_research_reports(symbol, months=24)
-        data['announcements'] = self.eastmoney.get_announcements(symbol, days=30)
-        data['major_shareholders'] = self.eastmoney.get_major_shareholders(symbol)
-        data['financial_data'] = self.eastmoney.get_financial_data(symbol)
-        data['pledge_info'] = self.eastmoney.get_pledge_info(symbol)
-        data['董秘互动'] = self.同花顺.get_董秘互动(symbol, days=60)
-        data['年报季报'] = self.巨潮资讯.get_年报季报(symbol)
-        data['ma_trend'] = self.行情.get_ma_trend(symbol)
-        data['macd'] = self.行情.get_macd(symbol)
+        source_status = {}  # 跟踪每个数据源的状态
+        fetchers = [
+            ('stock_info',         lambda: self.eastmoney.get_stock_info(symbol),          '东方财富-股票信息'),
+            ('research_reports',   lambda: self.eastmoney.get_research_reports(symbol, months=24), '东方财富-研报'),
+            ('announcements',      lambda: self.eastmoney.get_announcements(symbol, days=30),   '东方财富-公告'),
+            ('major_shareholders', lambda: self.eastmoney.get_major_shareholders(symbol),     '东方财富-主要股东'),
+            ('financial_data',     lambda: self.eastmoney.get_financial_data(symbol),        '东方财富-财务数据'),
+            ('pledge_info',        lambda: self.eastmoney.get_pledge_info(symbol),          '东方财富-质押信息'),
+            ('董秘互动',            lambda: self.tonghuashun.get_董秘互动(symbol, days=60),       '同花顺-董秘互动'),
+            ('年报季报',            lambda: self.juchao.get_年报季报(symbol),                    '巨潮资讯-年报季报'),
+            ('ma_trend',           lambda: self.quote.get_ma_trend(symbol),                  'Yahoo-均线趋势'),
+            ('macd',               lambda: self.quote.get_macd(symbol),                     'Yahoo-MACD'),
+        ]
+        
+        for key, fetcher_fn, source_name in fetchers:
+            try:
+                result = fetcher_fn()
+                data[key] = result
+                source_status[key] = {'status': 'success', 'source': source_name}
+                self.logger.info(f"[数据获取成功] {source_name} ({key}), 结果数: {len(result) if hasattr(result, '__len__') else 'N/A'}")
+            except Exception as e:
+                data[key] = None
+                source_status[key] = {'status': 'failed', 'source': source_name, 'error': str(e)}
+                self.logger.warning(f"[数据获取失败] {source_name} ({key}): {e}")
+        
+        # 将数据源状态也放入data中，供维度评估器判断"有数据"vs"无数据"
+        data['__data_source_status__'] = source_status
+        self.logger.info(f"[数据采集完成] 成功: {sum(1 for s in source_status.values() if s['status']=='success')}/{len(source_status)}, 股票: {symbol}")
         return data
     
     def _evaluate_dimension(self, dim_id: int, symbol: str, raw_data: Dict) -> DimensionScore:
@@ -115,7 +137,7 @@ class StockEvaluator:
         elif recent_count >= 3: score, desc = 3.0, f"近30天有{recent_count}条公告"
         elif recent_count >= 1: score, desc = 2.0, f"近30天有{recent_count}条公告"
         else: score, desc = 1.0, "近30天无公告"
-        url = f"https://datacenter.eastmoney.com/securities/api/data/v1/get?reportName=RPT_ANNOUNCEMENT_JUCHAO"
+        url = f"https://np-anotice-stock.eastmoney.com/api/security/ann"
         return DimensionScore(dim_id=dim_id, dim_name=dim_name, dim_category=category,
             score=score, eval_method="统计近30天公告数量", raw_value=f"数量: {recent_count}",
             threshold_desc=desc, data_sources=[DataSource(name="东方财富", url=url, fetch_time=datetime.now())])
